@@ -1,0 +1,245 @@
+# fizzbuzz
+
+```elixir
+Mix.install([
+  {:nx, "~> 0.7.2"},
+  {:axon, "~> 0.6.1"},
+  {:kino, "~> 0.12.3"},
+  {:exla, "~> 0.7.2"}
+])
+```
+
+## Section
+
+### fizzbuzz implemented as a traditional function
+
+```elixir
+fizzbuzz =
+  fn n ->
+    cond do
+      rem(n, 15) == 0 -> "fizzbuzz"
+      rem(n, 5) == 0 -> "buzz"
+      rem(n, 3) == 0 -> "fizz"
+      true -> n
+    end
+  end
+```
+
+```elixir
+1..9 |> Enum.map(fizzbuzz)
+```
+
+### Fizzbuzz implemented as a machine learning model
+
+```elixir
+defmodule Fizz do
+  @batchsize 100
+  @labels ~w(fizz buzz fizzbuzz)
+
+  def categories(n) do
+    cond do
+      rem(n, 15) == 0 -> [0, 0, 1, 0]
+      rem(n, 5) == 0 -> [0, 1, 0, 0]
+      rem(n, 3) == 0 -> [1, 0, 0, 0]
+      true -> [0, 0, 0, 1]
+    end
+  end
+
+  def targets do
+    for n <- 1..100 do
+      Nx.tensor([categories(n)])
+    end
+  end
+
+  def features(n) do
+    [rem(n, 3), rem(n, 5), rem(n, 15)]
+  end
+
+  def train_data do
+    feats =
+      for n <- 1..100 do
+        Nx.tensor(features(n)) |> Nx.reshape({1, 3})
+      end
+
+    tgts =
+      for n <- 1..100 do
+        Nx.tensor([categories(n)])
+      end
+
+    Stream.zip(feats, tgts)
+  end
+
+  def test_data do
+    for n <- 1..15 do
+      features(n)
+    end
+    |> Nx.tensor()
+  end
+
+  def model do
+    Axon.input("foo", shape: {nil, 3})
+    |> Axon.dense(10, activation: :tanh)
+    |> Axon.dense(4, activation: :softmax)
+  end
+
+  def init_model(model, n) do
+    # features = Nx.tensor([features(n)])
+    # Axon.predict(model, params, features[0])
+    Axon.build(model)
+  end
+
+  def labels_with_numbers(prediction) do
+    prediction
+    |> Nx.to_flat_list()
+    |> Enum.with_index(1)
+    |> Enum.map(&label_or_number/1)
+  end
+
+  def label_or_number({label, idx}) do
+    @labels
+    |> Enum.at(label)
+    |> Kernel.||(idx)
+  end
+
+  def predict({_init_fn, pred_fn} = fns, params, x) do
+    pred_fn.(params, x)
+  end
+
+  # the training part
+  def train(model, epochs) do
+    optimizer = Polaris.Optimizers.adamw(learning_rate: 0.005)
+    loss = :categorical_cross_entropy
+    traindata = Fizz.train_data()
+
+    Axon.Loop.trainer(model, loss, optimizer)
+    |> Axon.Loop.run(traindata, %{}, epochs: 100, compiler: EXLA)
+  end
+end
+
+Axon.Display.as_graph(Fizz.model(), Nx.template({3, 3}, :f32))
+```
+
+### training time!
+
+```elixir
+# fns = Fizz.model |> Axon.build()
+
+model = Fizz.model()
+IO.inspect(model)
+paramsit = Fizz.train(model, 5)
+```
+
+### now test out the model with random input
+
+```elixir
+koe = 24
+
+testaa =
+  fn koe ->
+    x_test_prep = Nx.tensor([Fizz.features(koe)])
+    n_pred = Axon.predict(model, paramsit, x_test_prep, compiler: EXLA)
+    # IO.inspect(Nx.to_flat_list(n_pred), label: :preds)
+    _category = Fizz.labels_with_numbers(Nx.argmax(n_pred))
+  end
+
+testaa.(koe)
+```
+
+### jotain kokeilua
+
+```elixir
+defmodule Foo do
+  @numbers_dataset Enum.to_list(0..10)
+  @splitratio 0.8
+  @sequence_length 1
+  @sequence_features 1
+  @batch_size 1
+
+  def dataset_split(nums_ds, splitratio) do
+    ds_count = Enum.count(nums_ds)
+    train_count = round(splitratio * ds_count)
+    {Enum.take(nums_ds, train_count), Enum.drop(nums_ds, train_count)}
+  end
+
+  def load_all_data do
+    {num_dataset, num_test_dataset} = dataset_split(@numbers_dataset, @splitratio)
+  end
+
+  def load_training_dataset(numbers_training_dataset) do
+    x_train =
+      numbers_training_dataset
+      |> Enum.chunk_every(@sequence_length, 1, :discard)
+      |> Enum.drop(-1)
+      |> Nx.tensor()
+      |> Nx.to_batched(@batch_size)
+
+    y_train =
+      numbers_training_dataset
+      |> Enum.chunk_every(@sequence_length, 1, :discard)
+      |> Enum.drop(1)
+      |> Nx.tensor()
+      |> Nx.to_batched(@batch_size)
+
+    numbers_training_zipped = Enum.zip(x_train, y_train)
+  end
+
+  def load_testing_dataset(numbers_testing_dataset) do
+    x_test =
+      numbers_testing_dataset
+      |> Enum.chunk_every(@sequence_length, 1, :discard)
+      |> Enum.drop(-1)
+      |> Nx.tensor()
+      |> Nx.to_batched(@batch_size)
+
+    y_test =
+      numbers_testing_dataset
+      |> Enum.chunk_every(@sequence_length, 1, :discard)
+      |> Enum.drop(1)
+      |> Nx.tensor()
+      |> Nx.to_batched(@batch_size)
+
+    numbers_testing_zipped = Stream.zip(x_test, y_test)
+  end
+
+  def numbers_model do
+    numbers_model =
+      Axon.input("nums", shape: {80, 1})
+      |> Axon.dense(10, kernel_initializer: :he_uniform, activation: :linear)
+      |> Axon.dense(5, kernel_initializer: :he_uniform, activation: :linear)
+      |> Axon.dropout(rate: 0.00005)
+      |> Axon.dense(1, kernel_initializer: :he_uniform, activation: :linear)
+  end
+
+  def trained_model_params(numbers_model, numbers_training_dataset) do
+    numbers_model_training_params =
+      numbers_model
+      |> Axon.Loop.trainer(:mean_squared_error, Polaris.Optimizers.adamw(learning_rate: 0.00005))
+      |> Axon.Loop.run(numbers_training_dataset, %{}, epochs: 100, compiler: EXLA)
+  end
+
+  def numbers_prediction(x_test, numbers_model, numbers_model_trainparams) do
+    x_test_prep =
+      x_test
+      |> Enum.chunk_every(@sequence_length, 1, :discard)
+      |> Nx.tensor()
+
+    numbers_pred =
+      Axon.predict(numbers_model, numbers_model_trainparams, x_test_prep, compiler: EXLA)
+      |> Nx.to_flat_list()
+  end
+end
+```
+
+```elixir
+# Axon.Display.as_graph(Foo.numbers_model, Nx.template({80,1}, :f32))
+
+{numbers_training_dataset, numbers_testing_dataset} = Foo.load_all_data()
+training_dataset = Foo.load_training_dataset(numbers_training_dataset)
+IO.inspect(training_dataset, label: :dataset)
+testing_dataset = Foo.load_testing_dataset(numbers_testing_dataset)
+numbers_model = Foo.numbers_model()
+numbers_model_trainparams = Foo.trained_model_params(numbers_model, training_dataset)
+# Foo.evaluate_numbers_model(numbers_model, numbers_model_trainparams, testing_dataset)
+x_test = [80, 60, 90, 70]
+Foo.numbers_prediction(x_test, numbers_model, numbers_model_trainparams)
+```
